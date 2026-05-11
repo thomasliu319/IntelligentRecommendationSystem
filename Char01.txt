@@ -1,0 +1,843 @@
+第1章 大语言模型推荐系统的技术框架
+【例1-1】使用PyTorch从零实现一个简化版的Transformer模型。详细讲解了Transformer的编码器部分，包括自注意力机制和前馈神经网络，最终运行代码展示Transformer的基础功能。
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+# 自注意力机制
+class SelfAttention(nn.Module):
+    def __init__(self, embed_size, heads):
+        super(SelfAttention, self).__init__()
+        self.embed_size=embed_size
+        self.heads=heads
+        self.head_dim=embed_size // heads
+        assert self.head_dim*heads==embed_size,               \
+                             "Embedding size needs to be divisible by heads"
+        self.values=nn.Linear(self.head_dim, self.head_dim, bias=False)
+        self.keys=nn.Linear(self.head_dim, self.head_dim, bias=False)
+        self.queries=nn.Linear(self.head_dim, self.head_dim, bias=False)
+        self.fc_out=nn.Linear(embed_size, embed_size)
+    def forward(self, values, keys, query, mask):
+        N=query.shape[0]
+        value_len, key_len, query_len=values.shape[1],          \
+                             keys.shape[1], query.shape[1]
+        values=values.reshape(N, value_len, self.heads, self.head_dim)
+        keys=keys.reshape(N, key_len, self.heads, self.head_dim)
+        queries=query.reshape(N, query_len, self.heads, self.head_dim)
+        energy=torch.einsum("nqhd,nkhd->nhqk",
+                               [queries, keys])  # (N, heads, query_len, key_len)
+        if mask is not None:
+            energy=energy.masked_fill(mask==0, float("-1e20"))
+        attention=torch.softmax(energy/(self.embed_size ** (1/2)), dim=3)
+        out=torch.einsum("nhql,nlhd->nqhd", [attention, values]).reshape(
+            N, query_len, self.embed_size
+        )
+        out=self.fc_out(out)
+        return out
+# Transformer 编码器层
+class TransformerBlock(nn.Module):
+    def __init__(self, embed_size, heads, dropout, forward_expansion):
+        super(TransformerBlock, self).__init__()
+        self.attention=SelfAttention(embed_size, heads)
+        self.norm1=nn.LayerNorm(embed_size)
+        self.norm2=nn.LayerNorm(embed_size)
+        self.feed_forward=nn.Sequential(
+            nn.Linear(embed_size, forward_expansion*embed_size),
+            nn.ReLU(),
+            nn.Linear(forward_expansion*embed_size, embed_size),
+        )
+        self.dropout=nn.Dropout(dropout)
+    def forward(self, value, key, query, mask):
+        attention=self.attention(value, key, query, mask)
+        x=self.dropout(self.norm1(attention+query))
+        forward=self.feed_forward(x)
+        out=self.dropout(self.norm2(forward+x))
+        return out
+# 编码器
+class Encoder(nn.Module):
+    def __init__(
+        self,
+        src_vocab_size,
+        embed_size,
+        num_layers,
+        heads,
+        device,
+        forward_expansion,
+        dropout,
+        max_length,
+    ):
+        super(Encoder, self).__init__()
+        self.embed_size=embed_size
+        self.device=device
+        self.word_embedding=nn.Embedding(src_vocab_size, embed_size)
+        self.position_embedding=nn.Embedding(max_length, embed_size)
+        self.layers=nn.ModuleList(
+            [ TransformerBlock( embed_size, heads, dropout=dropout,
+                    forward_expansion=forward_expansion,    )
+                for _ in range(num_layers) ]
+        )
+        self.dropout=nn.Dropout(dropout)
+    def forward(self, x, mask):
+        N, seq_length=x.shape
+        positions=torch.arange(0, seq_length).expand(
+                                          N, seq_length).to(self.device)
+        out=self.dropout(self.word_embedding(x)+              \
+                                          self.position_embedding(positions))
+        for layer in self.layers:
+            out=layer(out, out, out, mask)
+        return out
+# 测试代码
+device="cuda" if torch.cuda.is_available() else "cpu"
+embed_size=256
+num_layers=2
+heads=8
+dropout=0.1
+forward_expansion=4
+src_vocab_size=10000
+max_length=100
+encoder=Encoder(src_vocab_size, embed_size, num_layers,
+                   heads, device, forward_expansion, dropout, max_length
+                   ).to(device)
+# 示例输入
+sample_input=torch.randint(0, src_vocab_size,
+                                   (2, 10)).to(device)  # 两个序列，每个长度为10
+mask=None
+# 输出编码器结果
+output=encoder(sample_input, mask)
+print("Encoder Output Shape:", output.shape)
+【例1-2】基于PyTorch框架，关于Self-Attention和Multi-Head Attention的具体代码实现。
+import torch
+import torch.nn as nn
+# 定义Self-Attention机制
+class SelfAttention(nn.Module):
+    def __init__(self, embed_size):
+        """
+        初始化Self-Attention模块
+        :param embed_size: 输入特征的维度
+        """
+        super(SelfAttention, self).__init__()
+        self.embed_size=embed_size
+        
+        # 定义查询(Query)、键(Key)、值(Value)矩阵的线性变换
+        self.query=nn.Linear(embed_size, embed_size)
+        self.key=nn.Linear(embed_size, embed_size)
+        self.value=nn.Linear(embed_size, embed_size)
+        self.scale=torch.sqrt(torch.FloatTensor([embed_size]))
+    def forward(self, x):
+        """
+        前向传播
+        :param x: 输入序列，形状为(batch_size, seq_len, embed_size)
+        :return: 输出序列，形状为(batch_size, seq_len, embed_size)
+        """
+        # 计算查询、键和值
+        Q=self.query(x)  # (batch_size, seq_len, embed_size)
+        K=self.key(x)    # (batch_size, seq_len, embed_size)
+        V=self.value(x)  # (batch_size, seq_len, embed_size)
+        # 计算注意力分数矩阵
+        attention_scores=torch.matmul(Q, K.transpose(-1, -2))/self.scale
+                                              # (batch_size, seq_len, seq_len)
+        attention_weights=torch.softmax(attention_scores, dim=-1)
+                                              # 归一化得到注意力权重
+        # 使用注意力权重加权值向量
+        out=torch.matmul(attention_weights, V)
+                                              # (batch_size, seq_len, embed_size)
+        return out
+# 定义Multi-Head Attention机制
+class MultiHeadAttention(nn.Module):
+    def __init__(self, embed_size, heads):
+        """
+        初始化Multi-Head Attention模块
+        :param embed_size: 输入特征的维度
+        :param heads: 注意力头的数量
+        """
+        super(MultiHeadAttention, self).__init__()
+        self.embed_size=embed_size
+        self.heads=heads
+        self.head_dim=embed_size // heads
+        assert self.head_dim*heads==embed_size,                \
+                             "Embedding size needs to be divisible by heads"
+        # 定义多个头的线性变换
+        self.query=nn.Linear(embed_size, embed_size)
+        self.key=nn.Linear(embed_size, embed_size)
+        self.value=nn.Linear(embed_size, embed_size)
+        # 输出的线性变换
+        self.fc_out=nn.Linear(embed_size, embed_size)
+    def forward(self, x):
+        """
+        前向传播
+        :param x: 输入序列，形状为(batch_size, seq_len, embed_size)
+        :return: 输出序列，形状为(batch_size, seq_len, embed_size)
+        """
+        N, seq_len, embed_size=x.shape
+        # 计算查询、键和值
+        Q=self.query(x)  # (batch_size, seq_len, embed_size)
+        K=self.key(x)    # (batch_size, seq_len, embed_size)
+        V=self.value(x)  # (batch_size, seq_len, embed_size)
+        # 拆分到多个头
+        Q=Q.reshape(N, seq_len, self.heads, self.head_dim).transpose(1, 2)
+        K=K.reshape(N, seq_len, self.heads, self.head_dim).transpose(1, 2)
+        V=V.reshape(N, seq_len, self.heads, self.head_dim).transpose(1, 2)
+        # 计算注意力
+        attention_scores=torch.matmul(Q, K.transpose(-1, -2))/torch.sqrt(
+              torch.tensor(self.head_dim, dtype=torch.float32))
+        attention_weights=torch.softmax(attention_scores, dim=-1)
+        out=torch.matmul(attention_weights, V)
+                                       # (batch_size, heads, seq_len, head_dim)
+        # 合并多头结果
+        out=out.transpose(1, 2).reshape(N, seq_len, self.embed_size)
+        # 通过线性变换输出
+        out=self.fc_out(out)
+        return out
+# 示例数据
+batch_size=2
+seq_len=5
+embed_size=8
+heads=2
+# 随机输入数据
+x=torch.rand(batch_size, seq_len, embed_size)
+# Self-Attention测试
+self_attention=SelfAttention(embed_size)
+self_attention_output=self_attention(x)
+print("Self-Attention Output Shape:", self_attention_output.shape)
+# Multi-Head Attention测试
+multi_head_attention=MultiHeadAttention(embed_size, heads)
+multi_head_attention_output=multi_head_attention(x)
+print("Multi-Head Attention Output Shape:",
+       multi_head_attention_output.shape)
+【例1-3】使用Faiss进行向量检索，包括从数据生成、索引创建到查询的完整过程。
+import faiss
+import numpy as np
+# 1. 创建数据
+# 模拟生成 10000 个数据点，每个数据点 128 维
+data_dimension=128  # 向量维度
+num_data_points=10000  # 向量数量
+data=np.random.random((num_data_points,
+                            data_dimension)).astype('float32')  # 数据集
+# 模拟查询向量：生成 5 个查询向量，每个 128 维
+num_queries=5
+query_vectors=np.random.random((num_queries, data_dimension)).astype('float32')
+print("Data Shape:", data.shape)
+print("Query Vectors Shape:", query_vectors.shape)
+# 2. 创建 Faiss 索引
+index=faiss.IndexFlatL2(data_dimension)  # 基于 L2 距离（欧几里得距离）的平面索引
+print("Is Index Trained?", index.is_trained)  # 对于IndexFlatL2，不需要训练
+# 将数据添加到索引中
+index.add(data)
+print("Number of Vectors in Index:", index.ntotal)
+# 3. 查询最近邻向量
+k=10  # 查找前 k 个最近邻
+distances, indices=index.search(query_vectors, k)
+# 输出结果
+print("\nQuery Results:")
+for i in range(num_queries):
+    print(f"Query {i+1}:")
+    print(f"  Nearest Neighbors' Indices: {indices[i]}")
+    print(f"  Distances to Neighbors: {distances[i]}")
+【例1-4】代码实现：Prompt工程与上下文学习技术。
+import openai
+# 设置 OpenAI API 密钥
+openai.api_key="你的API密钥"
+# 定义一个通用的调用函数
+def generate_response(prompt, max_tokens=100):
+    """
+    使用 OpenAI 的 GPT 模型生成响应
+    :param prompt: 提示语
+    :param max_tokens: 最大生成的 token 数量
+    :return: 模型生成的文本
+    """
+    response=openai.Completion.create(
+        engine="text-davinci-003",  # 使用的模型
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=0.7  # 控制生成文本的随机性
+    )
+    return response.choices[0].text.strip()
+# 1. 简单任务的 Prompt 示例
+prompt_1="用户喜欢科幻电影，请推荐一部相关的电影。"
+response_1=generate_response(prompt_1)
+print("示例1：")
+print("提示语：", prompt_1)
+print("模型生成：", response_1)
+# 2. 使用上下文的推荐任务
+user_context="""
+用户最近观看了以下电影：
+1. 星际穿越
+2. 火星救援
+3. 复仇者联盟
+根据用户的观影历史，请推荐一部电影。
+"""
+response_2=generate_response(user_context)
+print("\n示例2：")
+print("用户上下文：", user_context)
+print("模型生成：", response_2)
+# 3. 结合复杂任务和示例的 Prompt
+complex_prompt="""
+任务：为用户生成个性化电影推荐。
+用户行为数据：
+- 最近观看：1. 盗梦空间 2. 黑客帝国
+- 偏好类型：科幻、动作
+- 用户喜欢剧情复杂的电影
+示例：
+输入：用户喜欢喜剧电影，推荐：《大话西游》
+输入：用户喜欢历史剧，推荐：《敦刻尔克》
+现在请根据用户行为数据，推荐一部电影。
+"""
+response_3=generate_response(complex_prompt)
+print("\n示例3：")
+print("复杂任务提示语：", complex_prompt)
+print("模型生成：", response_3)
+【例1-5】代码实现混合精度训练与数据并行。
+pip install torch torchvision
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from torch.cuda.amp import GradScaler, autocast
+# 检查是否支持 GPU
+device="cuda" if torch.cuda.is_available() else "cpu"
+print(f"运行设备：{device}")
+# 1. 数据准备
+# 创建简单的模拟数据集
+X=torch.rand(10000, 10)  # 输入数据：10000 个样本，每个有 10 个特征
+y=torch.randint(0, 2, (10000,))  # 输出数据：二分类标签
+# 使用 DataLoader 加载数据
+dataset=TensorDataset(X, y)
+dataloader=DataLoader(dataset, batch_size=256, shuffle=True)
+# 2. 定义一个简单的模型
+class SimpleModel(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(SimpleModel, self).__init__()
+        self.fc=nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, output_dim)
+        )
+    def forward(self, x):
+        return self.fc(x)
+model=SimpleModel(input_dim=10, output_dim=2).to(device)
+# 3. 设置优化器和损失函数
+criterion=nn.CrossEntropyLoss()
+optimizer=optim.Adam(model.parameters(), lr=0.001)
+# 混合精度训练需要的 GradScaler
+scaler=GradScaler()
+# 4. 模型训练：使用混合精度和数据并行
+epochs=5
+model=nn.DataParallel(model)  # 使用数据并行模式
+for epoch in range(epochs):
+    model.train()
+    epoch_loss=0
+    for batch_idx, (inputs, targets) in enumerate(dataloader):
+        inputs, targets=inputs.to(device), targets.to(device)
+        optimizer.zero_grad()
+        # 使用混合精度进行前向传播
+        with autocast():
+            outputs=model(inputs)
+            loss=criterion(outputs, targets)
+        # 使用 GradScaler 进行梯度缩放
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        epoch_loss += loss.item()
+    print(f"第 {epoch+1} 轮训练，平均损失：{epoch_loss/len(dataloader):.4f}")
+# 5. 模型评估
+model.eval()
+with torch.no_grad():
+    sample_input=torch.rand(5, 10).to(device)
+    with autocast():  # 使用混合精度推理
+        predictions=model(sample_input)
+    print("示例输入：", sample_input.cpu().numpy())
+    print("预测结果：", torch.argmax(predictions, dim=1).cpu().numpy())
+【例1-6】代码实现嵌入生成与用户画像建模，使用PyTorch实现从用户行为到嵌入生成的完整过程。
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+# 模拟数据集
+class UserItemDataset(Dataset):
+    """
+    模拟用户-物品交互数据
+    """
+    def __init__(self, num_users, num_items, num_samples):
+        self.num_users=num_users
+        self.num_items=num_items
+        self.num_samples=num_samples
+        self.data=[
+            (torch.randint(0, num_users, (1,)).item(),
+             torch.randint(0, num_items, (1,)).item())
+            for _ in range(num_samples)
+        ]
+    def __len__(self):
+        return self.num_samples
+    def __getitem__(self, idx):
+        return self.data[idx]
+# 参数配置
+num_users=100  			# 用户数量
+num_items=200  			# 物品数量
+embed_dim=8    			# 嵌入维度
+num_samples=1000  		# 数据集样本数量
+batch_size=64
+epochs=5
+learning_rate=0.01
+# 数据加载
+dataset=UserItemDataset(num_users, num_items, num_samples)
+dataloader=DataLoader(dataset, batch_size=batch_size, shuffle=True)
+# 嵌入生成模型
+class EmbeddingModel(nn.Module):
+    """
+    嵌入生成模型：用户和物品嵌入
+    """
+    def __init__(self, num_users, num_items, embed_dim):
+        super(EmbeddingModel, self).__init__()
+        self.user_embed=nn.Embedding(num_users, embed_dim)  	# 用户嵌入
+        self.item_embed=nn.Embedding(num_items, embed_dim)  	# 物品嵌入
+    def forward(self, user_ids, item_ids):
+        user_vector=self.user_embed(user_ids)  					# 用户向量
+        item_vector=self.item_embed(item_ids)  					# 物品向量
+        dot_product=(user_vector*item_vector).sum(dim=1)  	# 点积表示相关性
+        return dot_product, user_vector, item_vector
+model=EmbeddingModel(num_users, num_items, embed_dim)
+criterion=nn.MSELoss()  									# 均方误差损失
+optimizer=optim.Adam(model.parameters(), lr=learning_rate)
+# 模拟评分：所有用户-物品对的评分为 1（正交互）
+true_scores=torch.ones(batch_size)
+# 训练嵌入模型
+print("开始训练模型：")
+for epoch in range(epochs):
+    total_loss=0
+    for user_ids, item_ids in dataloader:
+        # 前向传播
+        predicted_scores, _, _=model(user_ids, item_ids)
+        # 计算损失
+        loss=criterion(predicted_scores, true_scores[:len(user_ids)])
+        # 后向传播
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    print(f"第 {epoch+1} 轮训练，平均损失：{total_loss/len(dataloader):.4f}")
+# 测试用户画像生成
+test_user=torch.tensor([0])  				# 测试用户ID
+test_item=torch.tensor([5])  				# 测试物品ID
+_, user_vector, item_vector=model(test_user, test_item)
+print("\n测试结果：")
+print(f"用户ID: {test_user.item()} 的嵌入向量: {
+        user_vector.detach().numpy()}")
+print(f"物品ID: {test_item.item()} 的嵌入向量: {
+        item_vector.detach().numpy()}")
+【例1-7】通过具体代码详细讲解Transformer架构的核心组件，包括自注意力机制、多头注意力和编码器-解码器架构的实现。代码使用PyTorch实现，并提供运行结果。
+pip install torch
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+# 定义自注意力机制
+class SelfAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads):
+        super(SelfAttention, self).__init__()
+        self.embed_dim=embed_dim
+        self.num_heads=num_heads
+        assert embed_dim % num_heads==0, "嵌入维度必须能被头数整除"
+        self.head_dim=embed_dim // num_heads
+        # 定义线性变换
+        self.query=nn.Linear(embed_dim, embed_dim)
+        self.key=nn.Linear(embed_dim, embed_dim)
+        self.value=nn.Linear(embed_dim, embed_dim)
+        self.output=nn.Linear(embed_dim, embed_dim)
+    def forward(self, x):
+        batch_size, seq_len, embed_dim=x.size()
+        # 线性变换
+        query=self.query(x).view(batch_size, seq_len, self.num_heads,
+                         self.head_dim).transpose(1, 2)
+        key=self.key(x).view(batch_size, seq_len, self.num_heads,
+                         self.head_dim).transpose(1, 2)
+        value=self.value(x).view(batch_size, seq_len, self.num_heads,
+                         self.head_dim).transpose(1, 2)
+        # 计算注意力得分
+        scores=torch.matmul(
+                query, key.transpose(-2, -1))/(self.head_dim ** 0.5)
+        attention=F.softmax(scores, dim=-1)
+        # 加权求和
+        weighted_value=torch.matmul(
+                        attention, value).transpose(1, 2).contiguous()
+        weighted_value=weighted_value.view(batch_size, seq_len, embed_dim)
+        # 输出
+        output=self.output(weighted_value)
+        return output
+# 定义编码器模块
+class TransformerEncoderLayer(nn.Module):
+    def __init__(self, embed_dim, num_heads, ff_dim, dropout=0.1):
+        super(TransformerEncoderLayer, self).__init__()
+        self.self_attention=SelfAttention(embed_dim, num_heads)
+        self.norm1=nn.LayerNorm(embed_dim)
+        self.norm2=nn.LayerNorm(embed_dim)
+        self.feed_forward=nn.Sequential(
+            nn.Linear(embed_dim, ff_dim),
+            nn.ReLU(),
+            nn.Linear(ff_dim, embed_dim)
+        )
+        self.dropout=nn.Dropout(dropout)
+    def forward(self, x):
+        # 自注意力子层
+        attention_output=self.self_attention(x)
+        x=self.norm1(x+self.dropout(attention_output))
+        # 前馈神经网络子层
+        ff_output=self.feed_forward(x)
+        x=self.norm2(x+self.dropout(ff_output))
+        return x
+# 定义完整的Transformer架构
+class Transformer(nn.Module):
+    def __init__(self, num_layers, embed_dim, num_heads, ff_dim,
+                   vocab_size, max_seq_len, num_classes):
+        super(Transformer, self).__init__()
+        self.embed=nn.Embedding(vocab_size, embed_dim)
+        self.position_embedding=nn.Parameter(
+                    torch.zeros(1, max_seq_len, embed_dim))
+        self.encoder_layers=nn.ModuleList([
+            TransformerEncoderLayer(embed_dim,
+                                 num_heads, ff_dim) for _ in range(num_layers)
+        ])
+        self.classifier=nn.Linear(embed_dim, num_classes)
+    def forward(self, x):
+        seq_len=x.size(1)
+        x=self.embed(x)+self.position_embedding[:, :seq_len, :]
+        for layer in self.encoder_layers:
+            x=layer(x)
+        output=self.classifier(x[:, 0, :])  # 取CLS位置的向量进行分类
+        return output
+# 超参数设置
+num_layers=2
+embed_dim=64
+num_heads=4
+ff_dim=128
+vocab_size=5000
+max_seq_len=50
+num_classes=10
+# 模型实例化
+model=Transformer(num_layers, embed_dim, num_heads, ff_dim,
+                       vocab_size, max_seq_len, num_classes)
+# 测试模型
+dummy_input=torch.randint(0, vocab_size, (32, max_seq_len))  # 模拟批量输入
+output=model(dummy_input)
+print("模型输出维度:", output.size())
+【例1-8】基于FAISS的召回模块。
+pip install faiss-cpu
+
+
+import numpy as np
+import faiss
+# 1. 模拟物品嵌入向量
+num_items=1000  # 假设有 1000 个物品
+embed_dim=128  # 嵌入向量的维度
+np.random.seed(42)
+# 生成随机物品向量（每个物品一个128维向量）
+item_vectors=np.random.random((num_items, embed_dim)).astype('float32')
+# 2. 构建 FAISS 索引
+index=faiss.IndexFlatL2(embed_dim)  # 使用 L2 距离作为相似度度量
+index.add(item_vectors)  # 添加物品向量到索引
+print(f"FAISS 索引构建完成，共有 {index.ntotal} 个物品向量")
+# 3. 模拟用户兴趣向量
+user_vector=np.random.random((1,embed_dim)).astype('float32') # 用户兴趣向量
+# 4. 执行召回操作
+k=10  # 召回前10个最相关的物品
+distances, indices=index.search(user_vector, k)  # 搜索最近的 k 个物品
+print("\n用户兴趣向量:")
+print(user_vector)
+print("\n召回的物品索引和对应的距离:")
+for rank, (idx, dist) in enumerate(zip(indices[0], distances[0])):
+    print(f"排名 {rank+1}: 物品索引 {idx}, 距离 {dist}")
+【例1-9】以下是一个基于机器学习模型实现的排序模块的代码示例，使用Python和Scikit-learn库构建一个简单的排序模型。
+pip install scikit-learn
+
+
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+# 1. 构造模拟数据
+np.random.seed(42)
+# 模拟用户特征、物品特征和用户行为
+num_samples=500  # 样本数量
+num_features_user=3  # 用户特征维度
+num_features_item=4  # 物品特征维度
+# 随机生成用户和物品特征
+user_features=np.random.random((num_samples, num_features_user))
+item_features=np.random.random((num_samples, num_features_item))
+# 随机生成用户行为得分（例如点击率或购买倾向）
+labels=np.random.uniform(0, 1, num_samples)
+# 合并用户特征和物品特征
+features=np.hstack([user_features, item_features])
+# 创建特征列名
+feature_names=[f"用户特征{i+1}" for i in range(num_features_user)]+\
+                [f"物品特征{i+1}" for i in range(num_features_item)]
+# 转为 Pandas DataFrame 方便展示
+data=pd.DataFrame(features, columns=feature_names)
+data['得分']=labels
+print("数据集前5行：")
+print(data.head())
+# 2. 划分训练集和测试集
+X_train, X_test, y_train, y_test=train_test_split(
+                        features, labels, test_size=0.2, random_state=42)
+# 3. 训练排序模型
+model=RandomForestRegressor(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+# 4. 测试模型并计算误差
+y_pred=model.predict(X_test)
+mse=mean_squared_error(y_test, y_pred)
+print(f"\n模型均方误差（MSE）：{mse:.4f}")
+# 5. 排序示例：对候选物品进行评分和排序
+candidate_user_features=np.random.random((10,
+                                 num_features_user))  # 候选用户特征
+candidate_item_features=np.random.random((10,
+                                 num_features_item))  # 候选物品特征
+# 合并用户和物品特征
+candidate_features=np.hstack([candidate_user_features,
+                                      candidate_item_features])
+# 预测得分
+candidate_scores=model.predict(candidate_features)
+# 排序
+sorted_indices=np.argsort(-candidate_scores)  # 从高到低排序
+print("\n候选物品排序结果：")
+for rank, idx in enumerate(sorted_indices):
+    print(f"排名 {rank+1}: 物品索引 {idx}, 
+             预测得分 {candidate_scores[idx]:.4f}")
+【例1-10】通过代码演示如何实现一个实时推荐与上下文处理模块的基本功能，包括实时捕捉用户行为、生成动态特征以及快速生成推荐结果。代码使用Python，结合Pandas和 NumPy模拟一个实时推荐系统的核心功能。
+pip install pandas numpy
+
+
+import pandas as pd
+import numpy as np
+# 1. 模拟用户行为数据
+# 假设每条行为包括：用户ID、行为类型（点击、搜索）、物品ID、时间戳和上下文（设备类型、地点）
+user_behaviors=pd.DataFrame({
+    '用户ID': [1, 2, 1, 3, 2, 1],
+    '行为类型': ['点击', '搜索', '点击', '点击', '搜索', '点击'],
+    '物品ID': [101, 102, 103, 101, 104, 105],
+    '时间戳': ['2024-11-26 10:00', '2024-11-26 10:02', '2024-11-26 10:05', 
+             '2024-11-26 10:10', '2024-11-26 10:15', '2024-11-26 10:20'],
+    '设备': ['手机', '电脑', '手机', '平板', '手机', '手机'],
+    '地点': ['杭州', '上海', '杭州', '北京', '上海', '杭州']
+})
+print("用户行为数据：")
+print(user_behaviors)
+# 2. 实时特征提取函数
+def extract_context_features(behavior):
+    """
+    根据用户行为提取实时上下文特征
+    """
+    user_id=behavior['用户ID']
+    device=behavior['设备']
+    location=behavior['地点']
+    
+    # 模拟特征：简单统计用户最近点击的物品数
+    recent_behaviors=user_behaviors[
+                                 (user_behaviors['用户ID']==user_id) &
+                                  (user_behaviors['行为类型']=='点击')]
+    num_recent_clicks=len(recent_behaviors)
+    
+    # 生成上下文特征
+    context_features={
+        '用户ID': user_id,
+        '最近点击次数': num_recent_clicks,
+        '设备类型': device,
+        '地点': location
+    }
+    return context_features
+# 提取某用户最近行为的上下文特征
+latest_behavior=user_behaviors.iloc[-1]
+context_features=extract_context_features(latest_behavior)
+print("\n实时上下文特征：")
+print(context_features)
+# 3. 推荐算法实现
+# 模拟一个简单的推荐算法：根据地点和设备类型匹配相关物品
+def recommend_items(context_features):
+    """
+    基于上下文特征生成推荐结果
+    """
+    location_based_items={
+        '杭州': [201, 202, 203],
+        '上海': [204, 205, 206],
+        '北京': [207, 208, 209]
+    }
+    device_based_items={
+        '手机': [301, 302],
+        '电脑': [303, 304],
+        '平板': [305, 306]
+    }
+    
+    # 基于地点的推荐
+    location_items=location_based_items.get(context_features['地点'], [])
+    # 基于设备的推荐
+    device_items=device_based_items.get(context_features['设备类型'], [])
+    
+    # 合并并去重
+    recommended_items=list(set(location_items+device_items))
+    return recommended_items
+# 获取推荐结果
+recommended_items=recommend_items(context_features)
+print("\n推荐结果：")
+print(recommended_items)
+# 4. 模拟推荐系统响应
+print("\n推荐系统响应：")
+print(f"根据用户 {context_features['用户ID']} 的实时上下文特征，推荐以下物品：{recommended_items}")
+【例1-11】本代码展示如何解决推荐系统中的数据稀疏性问题，使用矩阵分解技术来预测用户对未交互物品的兴趣。代码基于Python和NumPy实现，同时提供完整的中文运行结果。
+pip install numpy
+
+
+import numpy as np
+# 1. 模拟用户-物品交互矩阵
+# 0 表示用户未与该物品交互
+user_item_matrix=np.array([
+    [5, 3, 0, 1],
+    [4, 0, 0, 1],
+    [1, 1, 0, 5],
+    [0, 0, 5, 4],
+    [0, 0, 4, 0]
+], dtype=float)
+print("用户-物品交互矩阵：")
+print(user_item_matrix)
+# 2. 矩阵分解函数
+def matrix_factorization(R, K, steps=5000, alpha=0.002, beta=0.02):
+    """
+    矩阵分解实现
+    :param R: 用户-物品交互矩阵
+    :param K: 隐因子维度
+    :param steps: 迭代次数
+    :param alpha: 学习率
+    :param beta: 正则化参数
+    :return: 分解后的用户矩阵 P 和物品矩阵 Q
+    """
+    num_users, num_items=R.shape
+    P=np.random.rand(num_users, K)  # 用户矩阵
+    Q=np.random.rand(num_items, K)  # 物品矩阵
+    Q=Q.T  # 转置以便矩阵运算
+    for step in range(steps):
+        for i in range(num_users):
+            for j in range(num_items):
+                if R[i, j] > 0:  # 仅对有交互的数据优化
+                    eij=R[i, j]-np.dot(P[i, :], Q[:, j])  # 误差
+                    for k in range(K):
+                        P[i, k] += alpha*(2*eij*Q[k, j]-beta*P[i, k])
+                        Q[k, j] += alpha*(2*eij*P[i, k]-beta*Q[k, j])
+        
+        # 计算损失函数
+        loss=0
+        for i in range(num_users):
+            for j in range(num_items):
+                if R[i, j] > 0:
+                    loss += (R[i, j]-np.dot(P[i, :], Q[:, j])) ** 2
+                    loss += (beta/2)*(np.sum(P[i, :] ** 2)+np.sum(Q[:, j] ** 2))
+        if step % 1000==0:
+            print(f"迭代 {step} 次，损失值：{loss:.4f}")
+        if loss < 0.001:
+            break
+    return P, Q.T
+# 3. 矩阵分解应用
+K=2  # 设置隐因子维度
+P, Q=matrix_factorization(user_item_matrix, K)
+# 4. 重建预测矩阵
+predicted_matrix=np.dot(P, Q)
+print("\n预测的用户-物品评分矩阵：")
+print(predicted_matrix)
+# 5. 推荐示例
+user_id=0  # 为用户0生成推荐
+unseen_items=np.where(
+                   user_item_matrix[user_id]==0)[0]  # 找到用户未交互的物品
+recommendations={
+            item: predicted_matrix[user_id, item] for item in unseen_items}
+sorted_recommendations=sorted(recommendations.items(),
+                                      key=lambda x: x[1], reverse=True)
+print(f"\n为用户 {user_id} 推荐的物品及预测评分：")
+for item, score in sorted_recommendations:
+    print(f"物品 {item}: 预测评分 {score:.4f}")
+【例1-13】以下是一个更加详细的代码示例，展示如何通过分布式缓存和异步任务队列优化推荐系统在高并发场景中的性能。代码使用Flask提供服务，通过Redis实现缓存，同时使用Celery模拟异步任务的处理。
+pip install flask redis celery
+
+
+from flask import Flask, request, jsonify
+import redis
+from celery import Celery
+import time
+import random
+# 初始化 Flask 和 Redis
+app=Flask(__name__)
+cache=redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
+# 配置 Celery
+app.config['CELERY_BROKER_URL']='redis://localhost:6379/0'
+app.config['CELERY_RESULT_BACKEND']='redis://localhost:6379/0'
+celery=Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
+celery.conf.update(app.config)
+# 模拟推荐计算任务
+@celery.task
+def async_recommendation_task(user_id):
+    time.sleep(2)  # 模拟计算延迟
+    recommendations=[f"商品{random.randint(1, 100)}" for _ in range(5)]
+    return recommendations
+# 推荐接口
+@app.route('/recommend', methods=['GET'])
+def recommend():
+    user_id=request.args.get('user_id')  				# 获取用户ID
+    cache_key=f"recommendations:{user_id}"  			# 缓存键
+    # 尝试从缓存中获取结果
+    cached_result=cache.get(cache_key)
+    if cached_result:
+        print("从缓存中获取推荐结果")
+        return jsonify({
+            "user_id": user_id,
+            "recommendations": eval(cached_result),
+            "source": "cache"
+        })
+    # 启动异步任务计算推荐结果
+    task=async_recommendation_task.apply_async(args=[user_id])
+    # 模拟返回推荐占位符
+    return jsonify({
+        "user_id": user_id,
+        "recommendations": ["推荐计算中，请稍后刷新..."],
+        "source": "placeholder",
+        "task_id": task.id
+    })
+# 检查异步任务状态
+@app.route('/recommend_status', methods=['GET'])
+def check_recommendation_status():
+    task_id=request.args.get('task_id')  				# 获取任务ID
+    task_result=async_recommendation_task.AsyncResult(task_id)
+    if task_result.state=='PENDING':
+        return jsonify({
+            "task_id": task_id,
+            "status": "pending",
+            "result": None
+        })
+    elif task_result.state=='SUCCESS':
+        recommendations=task_result.result
+        # 将结果存入缓存
+        cache_key=f"recommendations:{task_id}"
+        cache.set(cache_key, str(recommendations), ex=30)
+        return jsonify({
+            "task_id": task_id,
+            "status": "success",
+            "result": recommendations
+        })
+    else:
+        return jsonify({
+            "task_id": task_id,
+            "status": task_result.state,
+            "result": None
+        })
+# 启动服务
+if __name__=="__main__":
+    app.run(host='0.0.0.0', port=5000, debug=True)
+
+
+运行以下命令分别启动Flask和Celery服务：
+# 启动 Flask 服务
+python app.py
+# 启动 Celery Worker
+celery -A app.celery worker --loglevel=info
+访问推荐接口，启动异步任务：
+http://localhost:5000/recommend?user_id=123
+
+检查任务状态：
+http://localhost:5000/recommend_status?task_id=some-task-id
+
+
